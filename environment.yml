@@ -1,11 +1,9 @@
 name: sc
 channels:
-  - defaults
+  - conda-forge
 dependencies:
   - python=3.10
   - huggingface_hub
-  - ca-certificates
-  - openssl
   - datasets
   - certifi
   - fsspec=2023.9.2
@@ -15,5 +13,8 @@ dependencies:
   - seaborn
   - accelerate
   - bitsandbytes
+  - ca-certificates
+  - openssl
+  - nltk
   - pip:
       - vllm
