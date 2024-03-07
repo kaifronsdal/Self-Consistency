@@ -1,7 +1,10 @@
 import os
 
-# os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,4,6,7,8,9"
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2,3,4,5,6,7,8,9"
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["OMP_NUM_THREADS"] = "128"
 
 IGNORE_INDEX = -100
 DEFAULT_PAD_TOKEN = "[PAD]"
@@ -9,31 +12,31 @@ DEFAULT_EOS_TOKEN = "</s>"
 DEFAULT_BOS_TOKEN = "</s>"
 DEFAULT_UNK_TOKEN = "</s>"
 
+
+from pathlib import Path
+
 from torch.utils.data import Dataset, DataLoader
 import torch
 import transformers
 import json
 import logging
 import copy
-
+from dataclasses import dataclass
+from tqdm import tqdm
+from accelerate import Accelerator
+from accelerate.utils import set_seed
 from torch.utils.data import random_split
 from transformers import TrainingArguments, Trainer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import get_linear_schedule_with_warmup
+from transformers import set_seed
 from torch.optim import AdamW
 
-from accelerate import Accelerator
-from accelerate.utils import set_seed
-
 from peft import PromptTuningConfig, PromptTuningInit, get_peft_model
-
-from tqdm import tqdm
 
 from prompt import make_full_source, make_full_target, make_answer_only_source, make_answer_only_target
 
 from util import save_output
-
-from pathlib import Path
 
 
 def _tokenize_fn(strings: list[str],
@@ -140,24 +143,17 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
         eval_dataset=eval_dataset,
     )
 
+def training_loop(root_dir, data_args, lr, num_epochs):
+    set_seed(0)
+    accelerator = Accelerator(mixed_precision="bf16")
 
-def train(model_name, lr, num_epochs, mixed_precision='fp16', data_args=None, root_dir=None):
-    if data_args is None:
-        data_args = {
-            "data_path": "data/selfee-train.json",
-            "training_objective": "full",
-        }
-    if root_dir is None:
-        root_dir = Path(".")
-
-    set_seed(42)
-    accelerator = Accelerator(mixed_precision=mixed_precision)
-
+    model_name = "deepseek-ai/deepseek-math-7b-instruct"
     model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16)
     # get model max input size
     model_max_length = model.config.max_position_embeddings
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True, model_max_length=model_max_length,
-                                              padding_side="right")
+                                      padding_side="right")
+
     tokenizer.add_special_tokens(
         {
             "bos_token": DEFAULT_BOS_TOKEN,
@@ -167,30 +163,6 @@ def train(model_name, lr, num_epochs, mixed_precision='fp16', data_args=None, ro
         }
     )
 
-    data_module = make_supervised_data_module(tokenizer, data_args, load=True, override=False,
-                                              output_path=root_dir / "data/selfee-train_preprocessed.pkl")
-
-    def _collate_fn(batch: list[dict]) -> dict[str, torch.Tensor]:
-        input_ids, labels = tuple([example[key] for example in batch]
-                                  for key in ("input_ids", "labels"))
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            input_ids,
-            batch_first=True,
-            padding_value=tokenizer.pad_token_id)
-        labels = torch.nn.utils.rnn.pad_sequence(labels,
-                                                 batch_first=True,
-                                                 padding_value=IGNORE_INDEX)
-        return dict(
-            input_ids=input_ids,
-            labels=labels,
-            attention_mask=input_ids.ne(tokenizer.pad_token_id),
-        )
-
-    train_dataloader = DataLoader(data_module["train_dataset"], shuffle=True, collate_fn=_collate_fn,
-                                  batch_size=1, pin_memory=True)
-    eval_dataloader = DataLoader(data_module["eval_dataset"], collate_fn=_collate_fn, batch_size=1,
-                                 pin_memory=True)
-
     prompt_tuning_init_text = "Classify if the tweet is a complaint or no complaint.\n"
     peft_config = PromptTuningConfig(
         task_type="CAUSAL_LM",
@@ -199,8 +171,17 @@ def train(model_name, lr, num_epochs, mixed_precision='fp16', data_args=None, ro
         prompt_tuning_init_text=prompt_tuning_init_text,
         tokenizer_name_or_path=model_name,
     )
+    
     model = get_peft_model(model, peft_config)
-    model.print_trainable_parameters()
+
+
+    data_module = make_supervised_data_module(tokenizer, data_args, load=True, override=False,
+                                      output_path=root_dir / "data/selfee-train_preprocessed.pkl")
+
+    train_dataloader = DataLoader(data_module["train_dataset"], shuffle=True, collate_fn=_collate_fn,
+                          batch_size=1, pin_memory=True)
+    eval_dataloader = DataLoader(data_module["eval_dataset"], collate_fn=_collate_fn, batch_size=1,
+                         pin_memory=True)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     lr_scheduler = get_linear_schedule_with_warmup(
@@ -215,39 +196,36 @@ def train(model_name, lr, num_epochs, mixed_precision='fp16', data_args=None, ro
 
     for epoch in range(num_epochs):
         model.train()
-        train_loss = 0
+        total_loss = 0
         for step, batch in enumerate(tqdm(train_dataloader)):
+            batch = {k: v.to(device) for k, v in batch.items()}
             outputs = model(**batch)
             loss = outputs.loss
-            train_loss += accelerator.gather(loss).detach().float()
+            total_loss += loss.detach().float()
+            # loss.backward()
             accelerator.backward(loss)
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
-
+            
         model.eval()
         eval_loss = 0
         for step, batch in enumerate(tqdm(eval_dataloader)):
+            batch = {k: v.to(device) for k, v in batch.items()}
             with torch.no_grad():
                 outputs = model(**batch)
             loss = outputs.loss
-            eval_loss += accelerator.gather(loss).detach().float()
-
+            eval_loss += loss.item()
+    
         eval_epoch_loss = eval_loss / len(eval_dataloader)
         eval_ppl = torch.exp(eval_epoch_loss)
-        train_epoch_loss = train_loss / len(train_dataloader)
+        train_epoch_loss = total_loss / len(train_dataloader)
         train_ppl = torch.exp(train_epoch_loss)
         accelerator.print(f"{epoch=}: {train_ppl=} {train_epoch_loss=} {eval_ppl=} {eval_epoch_loss=}")
 
-    # save model
-    model.save_pretrained(root_dir / "model")
-
-
-def main():
-    model_name = "deepseek-ai/deepseek-math-7b-instruct"
-
+if __name__ == "__main__":
     root_dir = Path("~").expanduser()
-
+    
     data_args = {
         "data_path": root_dir / "data/selfee-train.json",
         "training_objective": "full",
@@ -255,9 +233,5 @@ def main():
 
     lr = 3e-2
     num_epochs = 50
-
-    train(model_name, lr, num_epochs, data_args=data_args, root_dir=root_dir)
-
-
-if __name__ == "__main__":
-    main()
+    
+    training_loop(root_dir, data_args, lr, num_epochs)
