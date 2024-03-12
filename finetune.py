@@ -191,7 +191,7 @@ def train(model_name, lr, num_epochs, mixed_precision='fp16', data_args=None, ro
     eval_dataloader = DataLoader(data_module["eval_dataset"], collate_fn=_collate_fn, batch_size=1,
                                  pin_memory=True)
 
-    prompt_tuning_init_text = "Classify if the tweet is a complaint or no complaint.\n"
+    prompt_tuning_init_text = "Is this response correct or not? Provide feedback explaining your reasoning first."
     peft_config = PromptTuningConfig(
         task_type="CAUSAL_LM",
         prompt_tuning_init=PromptTuningInit.TEXT,
@@ -225,6 +225,17 @@ def train(model_name, lr, num_epochs, mixed_precision='fp16', data_args=None, ro
             lr_scheduler.step()
             optimizer.zero_grad()
 
+            if step % 1000 == 0:
+                accelerator.print(f"{epoch=}: {step=}/{len(train_dataloader)}: {train_loss / (step + 1)} loss")
+
+            if step % 20000 == 0:
+                unwrapped_model = accelerator.unwrap_model(model)
+                unwrapped_model.save_pretrained(
+                    root_dir / "checkpoint_finegrained",
+                    is_main_process=accelerator.is_main_process,
+                    save_function=accelerator.save,
+                )
+
         model.eval()
         eval_loss = 0
         for step, batch in enumerate(tqdm(eval_dataloader)):
@@ -239,12 +250,26 @@ def train(model_name, lr, num_epochs, mixed_precision='fp16', data_args=None, ro
         train_ppl = torch.exp(train_epoch_loss)
         accelerator.print(f"{epoch=}: {train_ppl=} {train_epoch_loss=} {eval_ppl=} {eval_epoch_loss=}")
 
+        # save checkpoint
+        unwrapped_model = accelerator.unwrap_model(model)
+        unwrapped_model.save_pretrained(
+            root_dir / "checkpoint",
+            is_main_process=accelerator.is_main_process,
+            save_function=accelerator.save,
+        )
+
     # save model
-    model.save_pretrained(root_dir / "model")
+    unwrapped_model = accelerator.unwrap_model(model)
+    unwrapped_model.save_pretrained(
+        root_dir / "model",
+        is_main_process=accelerator.is_main_process,
+        save_function=accelerator.save,
+    )
 
 
 def main():
-    model_name = "deepseek-ai/deepseek-math-7b-instruct"
+    # model_name = "deepseek-ai/deepseek-math-7b-instruct"
+    model_name = "google/gemma-2b-it"
 
     root_dir = Path("~").expanduser()
 
@@ -254,7 +279,7 @@ def main():
     }
 
     lr = 3e-2
-    num_epochs = 50
+    num_epochs = 4
 
     train(model_name, lr, num_epochs, data_args=data_args, root_dir=root_dir)
 

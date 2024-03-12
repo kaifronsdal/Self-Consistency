@@ -14,11 +14,47 @@ def generate_nshot_prompts(dataset, n: int | list[int] = 5):
 
     prompt_header = f'Answer the following {few_shot_count + 1} questions:\n\n'
     prompt_header += '\n'.join(
-        [f'{i + 1}. {ex["question"]}\n\n{ex["answer"]}\n\n' for i, ex in enumerate(prompt_examples)])
+        [f'{i + 1}. {ex["question"]}\n\nANSWER: {ex["answer"]}\n\n' for i, ex in enumerate(prompt_examples)])
     # prompt_header += '\n'.join([f'{ex["question"]}\n\n{ex["answer"]}\n\n' for ex in prompt_examples])
 
     return [{
-        'question': prompt_header + f'\n{few_shot_count + 1}. {ex["question"]}',
+        'question': prompt_header + f'\n{few_shot_count + 1}. {ex["question"]}\n\nANSWER: ',
+        'answer': ex["answer"],
+        'boxed': ex["boxed"]
+    } for ex in remaining_examples]
+
+
+def generate_nshot_prompts_from_template(dataset, n: int | list[int] = 5):
+    """
+    Generate n-shot prompts for a given dataset. Uses huggingface tokenizer to generate prompt template like
+    messages = [
+        {"role": "user", "content": "Who are you? Please, answer in pirate-speak."},
+    ]
+    tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+    :param dataset: A list of dictionaries, each containing a question and answer.
+    :param n: The number of examples to include in the prompt. If an integer, the first n examples will be included.
+              If a list, the examples at the given indices will be included.
+    :return: A list of (prompt, answer) tuples.
+    """
+    n = list(range(n)) if isinstance(n, int) else n
+    prompt_examples = [dataset[i] for i in n]
+    remaining_examples = [ex for i, ex in enumerate(dataset) if i not in n]
+
+    # question_modifier = "\n\nWrap your final answer with the `\\boxed{}` command."
+    question_modifier = ""
+
+    few_shot_messages = [
+        {"role": role, "content": content}
+        for ex in prompt_examples for role, content in
+        zip(["user", "assistant", "user", "assistant"],
+            [ex["question"] + question_modifier, ex["answer"], "FINAL ANSWER: ", ex["boxed"]])
+    ]
+
+    return [{
+        'question':
+            few_shot_messages + [{"role": "user", "content": ex["question"] + question_modifier}]
+            + [{"role": "user", "content": "FINAL ANSWER: "}],
         'answer': ex["answer"],
         'boxed': ex["boxed"]
     } for ex in remaining_examples]
@@ -109,4 +145,3 @@ if __name__ == "__main__":
     assert make_answer_only_target(example_len2_model1, eos_token="</s>") == (
         "This is the first model output.</s>"
     )
-
