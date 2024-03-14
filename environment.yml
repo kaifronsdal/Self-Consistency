@@ -1,6 +1,8 @@
 name: sc
 channels:
   - conda-forge
+  - pytorch
+  - nvidia
 dependencies:
   - python=3.10
   - torchvision
