@@ -153,6 +153,17 @@ def train(model_name, lr, num_epochs, mixed_precision='fp16', data_args=None, ro
     set_seed(42)
     accelerator = Accelerator(mixed_precision=mixed_precision)
 
+    # check to see if we should load from a checkpoint
+    checkpoint_dir = root_dir / "checkpoint"
+    # if checkpoint_dir.exists() and any(checkpoint_dir.glob("checkpoint_*")):
+    #     # load most recent checkpoint
+    #     print("Loading most recent checkpoint.")
+    #     checkpoint = sorted(checkpoint_dir.glob("checkpoint_*"))[-1]
+    #     print(f"Loading checkpoint from {checkpoint}.")
+    #     model = AutoModelForCausalLM.from_pretrained(checkpoint)
+    # else:
+    #     model = AutoModelForCausalLM.from_pretrained(model_name)
+
     model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16)
     # get model max input size
     model_max_length = model.config.max_position_embeddings
@@ -213,12 +224,26 @@ def train(model_name, lr, num_epochs, mixed_precision='fp16', data_args=None, ro
         model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
     )
 
+    # check for checkpoint
+    if checkpoint_dir.exists() and any(checkpoint_dir.glob("save_state_*")):
+        # load most recent checkpoint
+        print("Loading most recent checkpoint.")
+        checkpoint = sorted(checkpoint_dir.glob("save_state_*"))[-1]
+        print(f"Loading checkpoint from {checkpoint}.")
+        accelerator.load_state(checkpoint)
+
     for epoch in range(num_epochs):
         model.train()
         train_loss = 0
         for step, batch in enumerate(tqdm(train_dataloader)):
             outputs = model(**batch)
             loss = outputs.loss
+            # if loss becomes NaN
+            if not torch.isfinite(loss).item():
+                print(f"Loss is {loss}.")
+                print("Skipping step.")
+                continue
+
             train_loss += accelerator.gather(loss).detach().float()
             accelerator.backward(loss)
             optimizer.step()
@@ -229,12 +254,14 @@ def train(model_name, lr, num_epochs, mixed_precision='fp16', data_args=None, ro
                 accelerator.print(f"{epoch=}: {step=}/{len(train_dataloader)}: {train_loss / (step + 1)} loss")
 
             if step % 20000 == 0:
-                unwrapped_model = accelerator.unwrap_model(model)
-                unwrapped_model.save_pretrained(
-                    root_dir / "checkpoint_finegrained",
-                    is_main_process=accelerator.is_main_process,
-                    save_function=accelerator.save,
-                )
+                # save checkpoint
+                accelerator.save_state(checkpoint_dir / f"save_state_{epoch}_{step}")
+                # unwrapped_model = accelerator.unwrap_model(model)
+                # unwrapped_model.save_pretrained(
+                #     checkpoint_dir / f"checkpoint_{epoch}_{step}",
+                #     is_main_process=accelerator.is_main_process,
+                #     save_function=accelerator.save,
+                # )
 
         model.eval()
         eval_loss = 0
@@ -251,9 +278,10 @@ def train(model_name, lr, num_epochs, mixed_precision='fp16', data_args=None, ro
         accelerator.print(f"{epoch=}: {train_ppl=} {train_epoch_loss=} {eval_ppl=} {eval_epoch_loss=}")
 
         # save checkpoint
+        # accelerator.save_state(checkpoint_dir / f"checkpoint_{epoch}")
         unwrapped_model = accelerator.unwrap_model(model)
         unwrapped_model.save_pretrained(
-            root_dir / "checkpoint",
+            checkpoint_dir / f"checkpoint_{epoch}",
             is_main_process=accelerator.is_main_process,
             save_function=accelerator.save,
         )
@@ -261,7 +289,7 @@ def train(model_name, lr, num_epochs, mixed_precision='fp16', data_args=None, ro
     # save model
     unwrapped_model = accelerator.unwrap_model(model)
     unwrapped_model.save_pretrained(
-        root_dir / "model",
+        checkpoint_dir / "final_model",
         is_main_process=accelerator.is_main_process,
         save_function=accelerator.save,
     )
@@ -278,7 +306,7 @@ def main():
         "training_objective": "full",
     }
 
-    lr = 3e-2
+    lr = 1e-3
     num_epochs = 4
 
     train(model_name, lr, num_epochs, data_args=data_args, root_dir=root_dir)

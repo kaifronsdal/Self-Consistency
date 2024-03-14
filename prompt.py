@@ -72,6 +72,18 @@ PROMPT_DICT = {
         "### Instruction:\n{instruction}\n\n### Answer:\n"
     ),
 }
+PROMPT_DICT_CHAT_TEMPLATE = {
+    "prompt_input": (
+        "Below is an instruction that describes a task, paired with an input that provides further context. "
+        "Write a response that appropriately completes the request.\n\n"
+        "{instruction}\n\n{input}"
+    ),
+    "prompt_no_input": (
+        "Below is an instruction that describes a task. "
+        "Write a response that appropriately completes the request.\n\n"
+        "{instruction}"
+    ),
+}
 ANSWER_TEXT = "{output}"
 REVISION_TEXT = "\n\n### Revision {number}:\n{revision}"
 
@@ -82,6 +94,13 @@ def make_full_source(example):
     prompt_input, prompt_no_input = PROMPT_DICT["prompt_input"], PROMPT_DICT["prompt_no_input"]
     prompt = prompt_input.format_map(example) if example.get("input", "") != "" else prompt_no_input.format_map(example)
     return prompt
+
+
+def make_full_source_from_template(example):
+    """Make prompt for self-feedback."""
+    prompt_input, prompt_no_input = PROMPT_DICT_CHAT_TEMPLATE["prompt_input"], PROMPT_DICT_CHAT_TEMPLATE["prompt_no_input"]
+    prompt = prompt_input.format_map(example) if example.get("input", "") != "" else prompt_no_input.format_map(example)
+    return [{"role": "user", "content": prompt}]
 
 
 def make_full_target(example):
@@ -102,6 +121,26 @@ def make_full_target(example):
             prompt += "\n\n### Feedback {number}:\n{feedback}".format(number=feedback_number, feedback=feedback)
 
     return prompt
+
+
+def make_full_target_from_template(example):
+    """Make target for self-feedback."""
+    prompt_template = []
+    outputs = example["outputs"]
+    for i, output in enumerate(outputs):
+        if i == 0:
+            answer = output["output"]
+            prompt_template.append({"role": "assistant", "content": answer})
+        else:
+            revision = output["output"]
+            prompt_template.append({"role": "user", "content": "Revision {number}:".format(number=i)})
+            prompt_template.append({"role": "assistant", "content": revision})
+        if "feedback" in output:
+            feedback = output["feedback"]
+            prompt_template.append({"role": "user", "content": "Feedback {number}:".format(number=i + 1)})
+            prompt_template.append({"role": "assistant", "content": feedback})
+
+    return prompt_template
 
 
 def make_answer_only_source(example):
