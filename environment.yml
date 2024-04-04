@@ -1,4 +1,4 @@
-name: sc
+name: sc2
 channels:
   - conda-forge
   - pytorch

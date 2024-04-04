@@ -15,6 +15,7 @@ def save_output(func):
                     raise ValueError(f'Output file {output_path} already exists. Use --override to overwrite it.')
 
             output = func(*args, **kwargs)
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             with open(output_path, 'wb') as f:
                 pickle.dump(output, f)
             return output

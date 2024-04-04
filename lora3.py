@@ -2,6 +2,7 @@ import os
 
 # os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,4,6,7,8,9"
+# CUDA_VISIBLE_DEVICES="1,3,5" accelerate launch --config_file accelerate_config3.yaml finetune.py
 
 IGNORE_INDEX = -100
 # DEFAULT_PAD_TOKEN = "[PAD]"
@@ -17,7 +18,8 @@ import logging
 import copy
 
 from torch.utils.data import random_split
-from transformers import TrainingArguments, Trainer
+from transformers import TrainingArguments, Trainer, TrainingArguments
+from transformers.trainer_utils import get_last_checkpoint
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import get_linear_schedule_with_warmup
 from torch.optim import AdamW
@@ -29,7 +31,8 @@ from peft import PromptTuningConfig, PromptTuningInit, get_peft_model, LoraConfi
 
 from tqdm import tqdm
 
-from prompt import make_full_source, make_full_target, make_answer_only_source, make_answer_only_target
+from prompt import make_full_source, make_full_target, make_answer_only_source, make_answer_only_target, \
+    make_full_source_from_template, make_full_target_from_template
 
 from util import save_output
 
@@ -70,6 +73,9 @@ def preprocess(
 ) -> dict:
     """Preprocess the data by tokenizing."""
     examples = [s + t for s, t in zip(sources, targets)]
+    if isinstance(sources, list):
+        examples = [tokenizer.apply_chat_template(s, tokenize=False, add_generation_prompt=True) for s in examples]
+        sources = [tokenizer.apply_chat_template(s, tokenize=False, add_generation_prompt=True) for s in sources]
     examples_tokenized, sources_tokenized = [_tokenize_fn(strings, tokenizer) for strings in (examples, sources)]
     input_ids = examples_tokenized["input_ids"]
     labels = copy.deepcopy(input_ids)
@@ -95,8 +101,8 @@ class SupervisedDataset(Dataset):
         logging.warning("Formatting inputs...")
         if training_objective == "full":
             for example in list_data_dict:
-                source = make_full_source(example)
-                target = make_full_target(example)
+                source = make_full_source_from_template(example)
+                target = make_full_target_from_template(example)
                 target += f"{tokenizer.eos_token}"
                 sources.append(source)
                 targets.append(target)
@@ -154,7 +160,7 @@ def train(model_name, lr, num_epochs, mixed_precision='fp16', data_args=None, ro
     accelerator = Accelerator(mixed_precision=mixed_precision)
 
     # check to see if we should load from a checkpoint
-    checkpoint_dir = root_dir / "checkpoint"
+    checkpoint_dir = root_dir / "checkpoint_lora"
     # if checkpoint_dir.exists() and any(checkpoint_dir.glob("checkpoint_*")):
     #     # load most recent checkpoint
     #     print("Loading most recent checkpoint.")
@@ -169,14 +175,15 @@ def train(model_name, lr, num_epochs, mixed_precision='fp16', data_args=None, ro
     model_max_length = model.config.max_position_embeddings
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True, model_max_length=model_max_length,
                                               padding_side="right")
-    tokenizer.add_special_tokens(
-        {
-            "bos_token": DEFAULT_BOS_TOKEN,
-            "eos_token": DEFAULT_EOS_TOKEN,
-            "pad_token": DEFAULT_PAD_TOKEN,
-            "unk_token": DEFAULT_UNK_TOKEN,
-        }
-    )
+    # tokenizer.add_special_tokens(
+    #     # {
+    #     #     "bos_token": DEFAULT_BOS_TOKEN,
+    #     #     "eos_token": DEFAULT_EOS_TOKEN,
+    #     #     "pad_token": DEFAULT_PAD_TOKEN,
+    #     #     "unk_token": DEFAULT_UNK_TOKEN,
+    #     # }
+    # )
+    tokenizer.pad_token = tokenizer.eos_token
 
     data_module = make_supervised_data_module(tokenizer, data_args, load=True, override=False,
                                               output_path=root_dir / "data/selfee-train_preprocessed.pkl")
@@ -197,10 +204,10 @@ def train(model_name, lr, num_epochs, mixed_precision='fp16', data_args=None, ro
             attention_mask=input_ids.ne(tokenizer.pad_token_id),
         )
 
-    train_dataloader = DataLoader(data_module["train_dataset"], shuffle=True, collate_fn=_collate_fn,
-                                  batch_size=1, pin_memory=True)
-    eval_dataloader = DataLoader(data_module["eval_dataset"], collate_fn=_collate_fn, batch_size=1,
-                                 pin_memory=True)
+    # train_dataloader = DataLoader(data_module["train_dataset"], shuffle=True, collate_fn=_collate_fn,
+    #                               batch_size=1, pin_memory=True)
+    # eval_dataloader = DataLoader(data_module["eval_dataset"], collate_fn=_collate_fn, batch_size=1,
+    #                              pin_memory=True)
 
     # prompt_tuning_init_text = "Is this response correct or not? Provide feedback explaining your reasoning first."
     # peft_config = PromptTuningConfig(
@@ -211,102 +218,138 @@ def train(model_name, lr, num_epochs, mixed_precision='fp16', data_args=None, ro
     #     tokenizer_name_or_path=model_name,
     # )
     peft_config = LoraConfig(
-        r=16,
         lora_alpha=16,
-        target_modules=["query", "value"],
         lora_dropout=0.1,
+        r=64,
         bias="none",
-        modules_to_save=["classifier"],
+        task_type="CAUSAL_LM"
     )
     model = get_peft_model(model, peft_config)
     model.print_trainable_parameters()
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    lr_scheduler = get_linear_schedule_with_warmup(
-        optimizer=optimizer,
-        num_warmup_steps=0,
-        num_training_steps=(len(train_dataloader) * num_epochs),
+    training_args = TrainingArguments(
+        output_dir=checkpoint_dir,
+        overwrite_output_dir=True,
+        num_train_epochs=num_epochs,
+        per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
+        evaluation_strategy="steps",
+        load_best_model_at_end=True,
+        eval_steps=1000,
+        logging_steps=100,
+        save_steps=1000,
+        save_total_limit=4,
+        warmup_steps=0.03,
+        learning_rate=lr,
+        fp16=True,
+        report_to="none",
+        seed=42,
     )
 
-    model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
-        model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
+    trainer = Trainer(
+        model=model,
+        tokenizer=tokenizer,
+        args=training_args,
+        # max_seq_length=max_seq_length,
+        data_collator=_collate_fn,
+        train_dataset=data_module["train_dataset"],
+        eval_dataset=data_module["eval_dataset"],
     )
 
-    # check for checkpoint
-    if checkpoint_dir.exists() and any(checkpoint_dir.glob("save_state_*")):
-        # load most recent checkpoint
-        print("Loading most recent checkpoint.")
-        checkpoint = sorted(checkpoint_dir.glob("save_state_*"))[-1]
-        print(f"Loading checkpoint from {checkpoint}.")
-        accelerator.load_state(checkpoint)
+    last_checkpoint = None
+    if checkpoint_dir.exists():
+        last_checkpoint = get_last_checkpoint(checkpoint_dir)
 
-    for epoch in range(num_epochs):
-        model.train()
-        train_loss = 0
-        for step, batch in enumerate(tqdm(train_dataloader)):
-            outputs = model(**batch)
-            loss = outputs.loss
-            # if loss becomes NaN
-            if not torch.isfinite(loss).item():
-                print(f"Loss is {loss}.")
-                print("Skipping step.")
-                continue
+    trainer.train(resume_from_checkpoint=last_checkpoint)
+    trainer.save_model()
+    trainer.save_state()
 
-            train_loss += accelerator.gather(loss).detach().float()
-            accelerator.backward(loss)
-            optimizer.step()
-            lr_scheduler.step()
-            optimizer.zero_grad()
 
-            if step % 1000 == 0:
-                accelerator.print(f"{epoch=}: {step=}/{len(train_dataloader)}: {train_loss / (step + 1)} loss")
+    # optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    # lr_scheduler = get_linear_schedule_with_warmup(
+    #     optimizer=optimizer,
+    #     num_warmup_steps=0,
+    #     num_training_steps=(len(train_dataloader) * num_epochs),
+    # )
 
-            if step % 2000 == 0:
-                # save checkpoint
-                accelerator.save_state(checkpoint_dir / f"save_state_{epoch}_{step}")
-                # accelerator.free_memory()
-                unwrapped_model = accelerator.unwrap_model(model)
-                unwrapped_model.save_pretrained(
-                    checkpoint_dir / f"checkpoint_{epoch}_{step}",
-                    is_main_process=accelerator.is_main_process,
-                    save_function=accelerator.save,
-                )
+    # model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
+    #     model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
+    # )
 
-        model.eval()
-        eval_loss = 0
-        for step, batch in enumerate(tqdm(eval_dataloader)):
-            with torch.no_grad():
-                outputs = model(**batch)
-            loss = outputs.loss
-            eval_loss += accelerator.gather(loss).detach().float()
+    # # check for checkpoint
+    # if checkpoint_dir.exists() and any(checkpoint_dir.glob("save_state_*")):
+    #     # load most recent checkpoint
+    #     print("Loading most recent checkpoint.")
+    #     checkpoint = sorted(checkpoint_dir.glob("save_state_*"))[-1]
+    #     print(f"Loading checkpoint from {checkpoint}.")
+    #     accelerator.load_state(checkpoint)
 
-        eval_epoch_loss = eval_loss / len(eval_dataloader)
-        eval_ppl = torch.exp(eval_epoch_loss)
-        train_epoch_loss = train_loss / len(train_dataloader)
-        train_ppl = torch.exp(train_epoch_loss)
-        accelerator.print(f"{epoch=}: {train_ppl=} {train_epoch_loss=} {eval_ppl=} {eval_epoch_loss=}")
+    # for epoch in range(num_epochs):
+    #     model.train()
+    #     train_loss = 0
+    #     for step, batch in enumerate(tqdm(train_dataloader)):
+    #         outputs = model(**batch)
+    #         loss = outputs.loss
+    #         # if loss becomes NaN
+    #         if not torch.isfinite(loss).item():
+    #             print(f"Loss is {loss}.")
+    #             print("Skipping step.")
+    #             continue
 
-        # save checkpoint
-        # accelerator.save_state(checkpoint_dir / f"checkpoint_{epoch}")
-        unwrapped_model = accelerator.unwrap_model(model)
-        unwrapped_model.save_pretrained(
-            checkpoint_dir / f"checkpoint_{epoch}",
-            is_main_process=accelerator.is_main_process,
-            save_function=accelerator.save,
-        )
+    #         train_loss += accelerator.gather(loss).detach().float()
+    #         accelerator.backward(loss)
+    #         optimizer.step()
+    #         lr_scheduler.step()
+    #         optimizer.zero_grad()
 
-    # save model
-    unwrapped_model = accelerator.unwrap_model(model)
-    unwrapped_model.save_pretrained(
-        checkpoint_dir / "final_model",
-        is_main_process=accelerator.is_main_process,
-        save_function=accelerator.save,
-    )
+    #         if step % 1000 == 0:
+    #             accelerator.print(f"{epoch=}: {step=}/{len(train_dataloader)}: {train_loss / (step + 1)} loss")
+
+    #         if step % 20000 == 0:
+    #             # save checkpoint
+    #             accelerator.save_state(checkpoint_dir / f"save_state_{epoch}_{step}")
+    #             # unwrapped_model = accelerator.unwrap_model(model)
+    #             # unwrapped_model.save_pretrained(
+    #             #     checkpoint_dir / f"checkpoint_{epoch}_{step}",
+    #             #     is_main_process=accelerator.is_main_process,
+    #             #     save_function=accelerator.save,
+    #             # )
+
+    #     model.eval()
+    #     eval_loss = 0
+    #     for step, batch in enumerate(tqdm(eval_dataloader)):
+    #         with torch.no_grad():
+    #             outputs = model(**batch)
+    #         loss = outputs.loss
+    #         eval_loss += accelerator.gather(loss).detach().float()
+
+    #     eval_epoch_loss = eval_loss / len(eval_dataloader)
+    #     eval_ppl = torch.exp(eval_epoch_loss)
+    #     train_epoch_loss = train_loss / len(train_dataloader)
+    #     train_ppl = torch.exp(train_epoch_loss)
+    #     accelerator.print(f"{epoch=}: {train_ppl=} {train_epoch_loss=} {eval_ppl=} {eval_epoch_loss=}")
+
+    #     # save checkpoint
+    #     # accelerator.save_state(checkpoint_dir / f"checkpoint_{epoch}")
+    #     unwrapped_model = accelerator.unwrap_model(model)
+    #     unwrapped_model.save_pretrained(
+    #         checkpoint_dir / f"checkpoint_{epoch}",
+    #         is_main_process=accelerator.is_main_process,
+    #         save_function=accelerator.save,
+    #     )
+
+    # # save model
+    # unwrapped_model = accelerator.unwrap_model(model)
+    # unwrapped_model.save_pretrained(
+    #     checkpoint_dir / "final_model",
+    #     is_main_process=accelerator.is_main_process,
+    #     save_function=accelerator.save,
+    # )
 
 
 def main():
-    # model_name = "deepseek-ai/deepseek-math-7b-instruct"
     model_name = "deepseek-ai/deepseek-math-7b-instruct"
+    # model_name = "google/gemma-2b-it"
 
     root_dir = Path("~").expanduser()
 
@@ -315,8 +358,8 @@ def main():
         "training_objective": "full",
     }
 
-    lr = 2e-4
-    num_epochs = 10
+    lr = 1e-3
+    num_epochs = 4
 
     train(model_name, lr, num_epochs, data_args=data_args, root_dir=root_dir)
 
