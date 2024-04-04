@@ -1,0 +1,26 @@
+name: sc2
+channels:
+  - conda-forge
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.10
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1
+  - ca-certificates
+  - openssl
+  - huggingface_hub
+  - datasets
+  - fsspec=2023.9.2
+  - jupyterlab
+  - ipywidgets
+  - matplotlib
+  - seaborn
+  - accelerate
+  - bitsandbytes
+  - nltk
+  - certifi
+  - pip:
+      - vllm
+      - deepspeed

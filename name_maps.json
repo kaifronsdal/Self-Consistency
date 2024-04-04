@@ -1,0 +1,29 @@
+{
+  "DATASET_MAP": {
+    "EleutherAI/hendrycks_math_algebra": "Algebra",
+    "EleutherAI/hendrycks_math_counting_and_probability": "Counting_and_Probability",
+    "EleutherAI/hendrycks_math_geometry": "Geometry",
+    "EleutherAI/hendrycks_math_intermediate_algebra": "Intermediate_Algebra",
+    "EleutherAI/hendrycks_math_number_theory": "Number_Theory",
+    "EleutherAI/hendrycks_math_prealgebra": "Prealgebra",
+    "EleutherAI/hendrycks_math_precalculus": "Precalculus",
+    "gsm8k_main": "GSM8K"
+  },
+  "MODEL_MAP": {
+    "deepseek-ai/deepseek-math-7b-rl": "Deepseek-7b-RL",
+    "deepseek-ai/deepseek-math-7b-instruct": "Deepseek-7b-Instruct",
+    "llm-agents/tora-13b-v1.0": "Tora-13b-v1.0",
+    "EleutherAI/llemma_7b": "LLeMMA-7b",
+    "llm-agents/tora-7b-v1.0": "Tora-7b-v1.0",
+    "google/gemma-7b": "Gemma-7b",
+    "google/gemma-2b-it": "Gemma-2b-Instruct",
+    "morph-labs/morph-prover-v0-7b": "Morph-7b-v0",
+    "lmsys/vicuna-13b-v1.5": "Vicuna-13b-v1.5",
+    "lmsys/vicuna-7b-v1.5": "Vicuna-7b-v1.5",
+    "mistralai/Mistral-7B-Instruct-v0.2": "Mistral-7b-Instruct-v0.2",
+    "meta-llama/Llama-2-13b-chat-hf": "Llama-2-13b",
+    "meta-llama/Llama-2-7b-hf": "Llama-2-7b",
+    "kaist-ai/selfee-7b-delta": "SelFee-7b",
+    "Qwen/Qwen1.5-7B-Chat-AWQ": "Qwen-7b"
+  }
+}
